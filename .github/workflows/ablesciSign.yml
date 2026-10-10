@@ -4,15 +4,21 @@ name: AbleSci Auto Sign
 on:
   workflow_dispatch:
   schedule:
-    # UTC 00:10～13:10
     # 北京时间 08:10～21:10，每小时检查一次
     - cron: '10 0-13 * * *'
+
+    # 每月1日北京时间 09:47 自动保活
+    - cron: '47 1 1 * *'
 
 permissions:
   contents: read
 
 jobs:
+  # 每天随机时间签到一次
   sign:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '10 0-13 * * *'
     runs-on: ubuntu-latest
 
     steps:
@@ -36,7 +42,7 @@ jobs:
               seed = f"{now.date()}-{os.environ['GITHUB_REPOSITORY']}"
               digest = hashlib.sha256(seed.encode()).digest()
 
-              # 北京时间 08:00～21:59
+              # 北京时间 08:10～21:59
               hour = 8 + int.from_bytes(digest[:4], "big") % 14
               minute = 10 + int.from_bytes(digest[4:8], "big") % 50
 
@@ -75,7 +81,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Wait until random time
-        if: steps.random.outputs.run == 'true' && github.event_name == 'schedule'
+        if: >-
+          steps.random.outputs.run == 'true' &&
+          github.event_name == 'schedule'
         env:
           TARGET: ${{ steps.random.outputs.target }}
         run: |
@@ -92,10 +100,9 @@ jobs:
         if: steps.random.outputs.run == 'true'
         id: sign
         run: |
-          # 防止定时任务严重延迟后在22点之后签到
           if [ "$GITHUB_EVENT_NAME" = "schedule" ] && \
              [ "$(TZ=Asia/Shanghai date +%H)" -ge 22 ]; then
-            echo "已超过北京时间22点，跳过签到"
+            echo "超过北京时间22点，跳过签到"
             exit 0
           fi
 
@@ -106,3 +113,29 @@ jobs:
           # SCKEY: ${{ secrets.SCKEY }}
           # XZKEY: ${{ secrets.XZKEY }}
           PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }}
+
+  # 每月自动保活，防止60天无活动被停用
+  keepalive:
+    if: github.event.schedule == '47 1 1 * *'
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: write
+
+    steps:
+      - name: Keep workflow active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "开始自动保活..."
+
+          ref="${GITHUB_WORKFLOW_REF%@*}"
+          workflow_file="${ref##*/}"
+
+          echo "Workflow: $workflow_file"
+
+          gh api \
+            --method PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/enable"
+
+          echo "Workflow 保活请求成功"
