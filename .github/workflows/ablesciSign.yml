@@ -1,9 +1,12 @@
+
 name: AbleSci Auto Sign
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '40 13,00 * * *'  # UTC时间(北京时间为21:40和次日7:40)
+    # UTC 00:10～13:10
+    # 北京时间 08:10～21:10，每小时检查一次
+    - cron: '10 0-13 * * *'
 
 permissions:
   contents: read
@@ -11,28 +14,95 @@ permissions:
 jobs:
   sign:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Generate random sign time
+        id: random
+        run: |
+          python3 - <<'PY'
+          import os
+          import hashlib
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+          if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch":
+              should_run = True
+              target_ts = 0
+              print("手动触发，立即签到")
+          else:
+              # 每天生成一个固定的随机时间
+              seed = f"{now.date()}-{os.environ['GITHUB_REPOSITORY']}"
+              digest = hashlib.sha256(seed.encode()).digest()
+
+              # 北京时间 08:00～21:59
+              hour = 8 + int.from_bytes(digest[:4], "big") % 14
+              minute = 10 + int.from_bytes(digest[4:8], "big") % 50
+
+              target = now.replace(
+                  hour=hour,
+                  minute=minute,
+                  second=0,
+                  microsecond=0
+              )
+
+              print(f"今日随机签到时间：{target:%Y-%m-%d %H:%M}")
+
+              should_run = now.hour == hour
+              target_ts = int(target.timestamp())
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"run={str(should_run).lower()}\n")
+              f.write(f"target={target_ts}\n")
+          PY
+
       - name: Checkout code
+        if: steps.random.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.random.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.random.outputs.run == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Wait until random time
+        if: steps.random.outputs.run == 'true' && github.event_name == 'schedule'
+        env:
+          TARGET: ${{ steps.random.outputs.target }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import time
+
+          delay = max(0, int(os.environ["TARGET"]) - time.time())
+          print(f"等待 {delay:.0f} 秒后签到")
+          time.sleep(delay)
+          PY
+
       - name: Run AbleSci Sign
+        if: steps.random.outputs.run == 'true'
         id: sign
-        run: python ablesci.py
+        run: |
+          # 防止定时任务严重延迟后在22点之后签到
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ] && \
+             [ "$(TZ=Asia/Shanghai date +%H)" -ge 22 ]; then
+            echo "已超过北京时间22点，跳过签到"
+            exit 0
+          fi
+
+          python ablesci.py
         env:
           GITHUB_ACTIONS: true
           ABLESCI_ACCOUNTS: ${{ secrets.ABLESCI_ACCOUNTS }}
-          # 选择一种通知服务
-          # SCKEY: ${{ secrets.SCKEY }}          # Server酱
-          # XZKEY: ${{ secrets.XZKEY }}        # 息知 (按需启用)
-          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }} # PushPlus (按需启用)
+          # SCKEY: ${{ secrets.SCKEY }}
+          # XZKEY: ${{ secrets.XZKEY }}
+          PUSH_PLUS_TOKEN: ${{ secrets.PUSH_PLUS_TOKEN }}
